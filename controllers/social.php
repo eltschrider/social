@@ -316,7 +316,7 @@ class Social extends Public_Controller
 					throw new Exception(sprintf('No uid in response from "%s".', $auth->provider));
 				}
 				
-				if (empty($user_hash['nickname'])) {
+				if (!empty($user_hash['nickname'])) {
 					$username = $user_hash['nickname'];
 				} else {
 					$email_parts = explode('@', $user_hash['email']);
