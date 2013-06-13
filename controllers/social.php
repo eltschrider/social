@@ -28,6 +28,8 @@ class Social extends Public_Controller
 		
 		$this->lang->load('social');
 		
+		$this->config->load('social');
+		
 		$this->load->model(array('authentication_m', 'credential_m'));
 	}
 	
@@ -269,24 +271,155 @@ class Social extends Public_Controller
 			    show_error('Failed to log you in.');
 			}
 		
-			$this->session->set_flashdata('success', lang('user_logged_in'));
+			$this->session->set_flashdata('success', lang('social:user_logged_in'));
 		    redirect('/');
 		}
 
-		// They aren't a user, so redirect to registration page
+		// user may exist, but without provider x authentication
+		// add provider x authentication here
+		else if ($this->ion_auth->email_check($user_hash['email'])) {
+			$user = $this->user_m->get(array('email' => $user_hash['email']));
+				
+			// Attach this account to the logged in user
+			$this->authentication_m->save(array(
+					'user_id' 		=> $user->id,
+					'provider' 		=> $provider->name,
+					'uid' 			=> $user_hash['uid'],
+					'access_token' 	=> isset($token->access_token) ? $token->access_token : null,
+					'secret' 		=> isset($token->secret) ? $token->secret : null,
+					'expires' 		=> isset($token->expires) ? $token->expires : null,
+					'refresh_token' => isset($token->refresh_token) ? $token->refresh_token : null,
+			));
+		
+			$auth = $this->authentication_m->get_by(array(
+					'uid' => $user_hash['uid'],
+					'provider' => $provider->name,
+			));
+			// Force a login with this username
+			if ( ! $this->ion_auth->force_login($auth->user_id))
+			{
+				show_error('Failed to log you in.');
+			}
+		
+			$this->session->set_flashdata('success', lang('social:user_logged_in'));
+			redirect('/');
+				
+		}
+		
+		// They aren't a user, so either instant registration or redirect to registration page
 		else
 		{
-			$this->session->set_userdata(array(
-				'user_hash' => $user_hash,
-				'token' => array(
-					'access_token' => $token->access_token,
-					'expires' => $token->expires,
-					'refresh_token' => $token->refresh_token,
-					'provider' => $provider->name,
-				),
-			));
+			if ($this->config->item('social:instant_registration')){
+				// If there is no uid we can't remember who this is
+				if (empty($user_hash['uid']))
+				{
+					throw new Exception(sprintf('No uid in response from "%s".', $auth->provider));
+				}
+				
+				if (empty($user_hash['nickname'])) {
+					$username = $user_hash['nickname'];
+				} else {
+					$email_parts = explode('@', $user_hash['email']);
+					$username = $email_parts[0];
+				}
 
-			redirect('users/register');
+				// Usernames absolutely need to be unique, so let's keep
+				// trying until we get a unique one
+				$i = 1;
+
+				$username_base = $username;
+
+				while ($this->db->where('username', $username)
+					->count_all_results('users') > 0)
+				{
+					// make sure that we don't go over our 20 char username even with a 2 digit integer added
+					$username = substr($username_base, 0, 18).$i;
+
+					++$i;
+				}
+									
+				$profile_data['first_name'] = empty($user_hash['first_name']) ? $username : $user_hash['first_name']; 
+				$profile_data['last_name'] = empty($user_hash['last_name']) ? $username : $user_hash['last_name']; 
+				$profile_data['display_name'] = $username;
+				$password = md5($username . time() . $this->config->item('social:instant_registration_salt'));
+				$password = substr($password, 2, 8);
+				$email = $user_hash['email'];
+					
+				// register the user 
+				$id = $this->ion_auth->register($username, $password, $email, $this->config->item('social:instant_registration_group_id'), $profile_data);
+				
+				// Try to create the user
+				if ($id > 0)
+				{
+					// Convert the array to an object
+					$user->username = $username;
+					$user->display_name = $username;
+					$user->email = $email;
+					$user->password = $password;
+				
+					// Attach this account to the logged in user
+					$this->authentication_m->save(array(
+							'user_id' 		=> $id,
+							'provider' 		=> $provider->name,
+							'uid' 			=> $user_hash['uid'],
+							'access_token' 	=> isset($token->access_token) ? $token->access_token : null,
+							'secret' 		=> isset($token->secret) ? $token->secret : null,
+							'expires' 		=> isset($token->expires) ? $token->expires : null,
+							'refresh_token' => isset($token->refresh_token) ? $token->refresh_token : null,
+					));
+						
+					// trigger an event for third party devs
+					Events::trigger('post_user_register', $id);
+				
+					/* send the internal registered email if applicable */
+					if (Settings::get('registered_email'))
+					{
+						$this->load->library('user_agent');
+				
+						Events::trigger('email', array(
+								'name' => $user->display_name,
+								'sender_ip' => $this->input->ip_address(),
+								'sender_agent' => $this->agent->browser().' '.$this->agent->version(),
+								'sender_os' => $this->agent->platform(),
+								'slug' => 'registered',
+								'email' => Settings::get('contact_email'),
+						), 'array');
+					}
+				
+					$auth = $this->authentication_m->get_by(array(
+							'uid' => $user_hash['uid'],
+							'provider' => $provider->name,
+					));
+					// Force a login with this username
+					if ( ! $this->ion_auth->force_login($auth->user_id))
+					{
+						show_error('Failed to log you in.');
+					}
+						
+					$this->session->set_flashdata('success', lang('social:user_logged_in'));
+					redirect('/');
+				
+				}
+				// Can't create the user, show why
+				else
+				{
+					$this->session->set_flashdata('error', $this->ion_auth->errors());
+					redirect('users/register');
+				}				
+			} else {
+				// user needs to register manually
+				$this->session->set_userdata(array(
+					'user_hash' => $user_hash,
+					'token' => array(
+						'access_token' => $token->access_token,
+						'expires' => $token->expires,
+						'refresh_token' => $token->refresh_token,
+						'provider' => $provider->name,
+					),
+				));
+	
+				redirect('users/register');
+			}
 		}
 	}
 	
